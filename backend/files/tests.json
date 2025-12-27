@@ -1,0 +1,23 @@
+{
+  "tests": [
+    {
+      "name": "Upload file",
+      "method": "POST",
+      "path": "/",
+      "headers": {
+        "X-User-Id": "1"
+      },
+      "body": {
+        "file_data": "SGVsbG8gV29ybGQh",
+        "file_name": "test.txt",
+        "file_type": "text/plain"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "success": true,
+        "file_url": "string"
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}

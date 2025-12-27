@@ -1,0 +1,24 @@
+{
+  "tests": [
+    {
+      "name": "Start call",
+      "method": "POST",
+      "path": "/",
+      "headers": {
+        "X-User-Id": "1"
+      },
+      "body": {
+        "action": "start_call",
+        "chat_id": 1,
+        "receiver_id": 2,
+        "call_type": "audio"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "success": true,
+        "call_id": "number"
+      },
+      "bodyMatcher": "partial"
+    }
+  ]
+}

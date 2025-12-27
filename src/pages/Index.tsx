@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -6,9 +6,12 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Badge } from '@/components/ui/badge';
 import Icon from '@/components/ui/icon';
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
+import { WebRTCCall } from '@/components/WebRTCCall';
+import { FriendRequests } from '@/components/FriendRequests';
 
 type User = {
   id: number;
@@ -32,11 +35,14 @@ type Chat = {
   status_text?: string;
   status_emoji?: string;
   unread_count: number;
+  other_user_id?: number;
 };
 
 type Message = {
   id: number;
   text: string;
+  type: string;
+  file_url?: string;
   time: string;
   is_own: boolean;
   sender_name: string;
@@ -44,6 +50,7 @@ type Message = {
 
 const Index = () => {
   const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
@@ -57,13 +64,17 @@ const Index = () => {
   const [selectedChat, setSelectedChat] = useState<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [messageText, setMessageText] = useState('');
+  const [searchText, setSearchText] = useState('');
   
   const [addFriendNick, setAddFriendNick] = useState('');
   const [groupName, setGroupName] = useState('');
-  const [isCallActive, setIsCallActive] = useState(false);
+  const [callState, setCallState] = useState<{active: boolean; type: 'audio' | 'video'; receiverId: number} | null>(null);
+  
   const [showAddFriendDialog, setShowAddFriendDialog] = useState(false);
   const [showCreateGroupDialog, setShowCreateGroupDialog] = useState(false);
   const [showProfileDialog, setShowProfileDialog] = useState(false);
+  const [showRequestsDialog, setShowRequestsDialog] = useState(false);
+  const [showSearchDialog, setShowSearchDialog] = useState(false);
 
   const [editNickname, setEditNickname] = useState('');
   const [editStatusText, setEditStatusText] = useState('');
@@ -106,10 +117,10 @@ const Index = () => {
     }
   };
 
-  const loadMessages = async (chatId: number) => {
+  const loadMessages = async (chatId: number, search?: string) => {
     if (!currentUser) return;
     try {
-      const response = await api.getMessages(currentUser.id, chatId);
+      const response = await api.getMessages(currentUser.id, chatId, search);
       if (response.messages) {
         setMessages(response.messages);
       }
@@ -169,21 +180,45 @@ const Index = () => {
     }
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedChat || !currentUser) return;
+
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = reader.result?.toString().split(',')[1];
+        if (base64) {
+          const uploadResponse = await api.uploadFile(currentUser.id, base64, file.name, file.type);
+          if (uploadResponse.success) {
+            const messageType = file.type.startsWith('image/') ? 'image' : 'file';
+            await api.sendMessage(currentUser.id, selectedChat.id, file.name, messageType, uploadResponse.file_url);
+            loadMessages(selectedChat.id);
+            loadChats();
+            toast({ title: 'Успешно!', description: 'Файл отправлен' });
+          }
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      toast({ title: 'Ошибка', description: 'Не удалось загрузить файл', variant: 'destructive' });
+    }
+  };
+
   const handleAddFriend = async () => {
     if (!addFriendNick.trim() || !currentUser) return;
     
     try {
       const response = await api.sendFriendRequest(currentUser.id, addFriendNick);
       if (response.success) {
-        toast({ title: 'Успешно!', description: 'Друг добавлен, чат создан' });
+        toast({ title: 'Успешно!', description: 'Запрос отправлен' });
         setAddFriendNick('');
         setShowAddFriendDialog(false);
-        loadChats();
       } else {
         toast({ title: 'Ошибка', description: response.error, variant: 'destructive' });
       }
     } catch (error) {
-      toast({ title: 'Ошибка', description: 'Не удалось добавить друга', variant: 'destructive' });
+      toast({ title: 'Ошибка', description: 'Не удалось отправить запрос', variant: 'destructive' });
     }
   };
 
@@ -233,6 +268,36 @@ const Index = () => {
     }
   };
 
+  const handleStartCall = (type: 'audio' | 'video') => {
+    if (!selectedChat || selectedChat.is_group) return;
+    
+    const receiverId = chats.find(c => c.id === selectedChat.id)?.other_user_id;
+    if (!receiverId) {
+      toast({ title: 'Ошибка', description: 'Не удалось определить собеседника', variant: 'destructive' });
+      return;
+    }
+    
+    setCallState({ active: true, type, receiverId });
+  };
+
+  const handleMuteChat = async (chatId: number, isMuted: boolean) => {
+    if (!currentUser) return;
+    try {
+      await api.muteChat(currentUser.id, chatId, isMuted);
+      toast({ title: 'Успешно', description: isMuted ? 'Уведомления выключены' : 'Уведомления включены' });
+    } catch (error) {
+      toast({ title: 'Ошибка', description: 'Не удалось изменить настройки', variant: 'destructive' });
+    }
+  };
+
+  const handleSearch = () => {
+    if (selectedChat && searchText.trim()) {
+      loadMessages(selectedChat.id, searchText);
+    } else if (selectedChat) {
+      loadMessages(selectedChat.id);
+    }
+  };
+
   const formatTime = (isoTime?: string) => {
     if (!isoTime) return '';
     const date = new Date(isoTime);
@@ -247,6 +312,18 @@ const Index = () => {
       return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
     }
   };
+
+  if (callState?.active && currentUser && selectedChat) {
+    return (
+      <WebRTCCall
+        chatId={selectedChat.id}
+        userId={currentUser.id}
+        receiverId={callState.receiverId}
+        callType={callState.type}
+        onEnd={() => setCallState(null)}
+      />
+    );
+  }
 
   if (!isAuthenticated) {
     return (
@@ -367,6 +444,29 @@ const Index = () => {
             </div>
           </div>
           <div className="flex gap-2">
+            <Dialog open={showRequestsDialog} onOpenChange={setShowRequestsDialog}>
+              <DialogTrigger asChild>
+                <Button variant="ghost" size="icon">
+                  <Icon name="Bell" size={20} />
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Запросы в друзья</DialogTitle>
+                  <DialogDescription>Входящие запросы на добавление в друзья</DialogDescription>
+                </DialogHeader>
+                {currentUser && (
+                  <FriendRequests
+                    userId={currentUser.id}
+                    onRequestAccepted={() => {
+                      loadChats();
+                      setShowRequestsDialog(false);
+                    }}
+                  />
+                )}
+              </DialogContent>
+            </Dialog>
+
             <Dialog open={showAddFriendDialog} onOpenChange={setShowAddFriendDialog}>
               <DialogTrigger asChild>
                 <Button variant="ghost" size="icon">
@@ -389,7 +489,7 @@ const Index = () => {
                     />
                   </div>
                   <Button onClick={handleAddFriend} className="w-full">
-                    Добавить
+                    Отправить запрос
                   </Button>
                 </div>
               </DialogContent>
@@ -454,9 +554,7 @@ const Index = () => {
                   <p className="text-sm text-muted-foreground truncate">{chat.last_message}</p>
                 </div>
                 {chat.unread_count > 0 && (
-                  <div className="w-6 h-6 rounded-full bg-primary flex items-center justify-center">
-                    <span className="text-xs font-medium">{chat.unread_count}</span>
-                  </div>
+                  <Badge className="rounded-full">{chat.unread_count}</Badge>
                 )}
               </button>
             ))}
@@ -489,43 +587,58 @@ const Index = () => {
                 </div>
               </div>
               <div className="flex gap-2">
+                <Dialog open={showSearchDialog} onOpenChange={setShowSearchDialog}>
+                  <DialogTrigger asChild>
+                    <Button variant="ghost" size="icon">
+                      <Icon name="Search" size={20} />
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Поиск по сообщениям</DialogTitle>
+                    </DialogHeader>
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="Введите текст для поиска..."
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                        onKeyPress={(e) => e.key === 'Enter' && handleSearch()}
+                      />
+                      <Button onClick={handleSearch}>
+                        <Icon name="Search" size={20} />
+                      </Button>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+                
+                {!selectedChat.is_group && (
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleStartCall('audio')}
+                    >
+                      <Icon name="Phone" size={20} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleStartCall('video')}
+                    >
+                      <Icon name="Video" size={20} />
+                    </Button>
+                  </>
+                )}
+                
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={() => setIsCallActive(!isCallActive)}
-                  className={isCallActive ? 'bg-primary text-primary-foreground' : ''}
+                  onClick={() => handleMuteChat(selectedChat.id, true)}
                 >
-                  <Icon name="Phone" size={20} />
-                </Button>
-                <Button variant="ghost" size="icon">
-                  <Icon name="Video" size={20} />
-                </Button>
-                <Button variant="ghost" size="icon">
-                  <Icon name="MoreVertical" size={20} />
+                  <Icon name="BellOff" size={20} />
                 </Button>
               </div>
             </div>
-
-            {isCallActive && (
-              <div className="bg-primary/10 p-4 border-b border-border flex items-center justify-between animate-fade-in">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-primary flex items-center justify-center animate-pulse">
-                    <Icon name="Phone" size={20} />
-                  </div>
-                  <div>
-                    <p className="font-medium">Звонок активен</p>
-                    <p className="text-sm text-muted-foreground">00:42</p>
-                  </div>
-                </div>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={() => setIsCallActive(false)}
-                >
-                  Завершить
-                </Button>
-              </div>
-            )}
 
             <ScrollArea className="flex-1 p-4">
               <div className="space-y-4 max-w-3xl mx-auto">
@@ -544,7 +657,20 @@ const Index = () => {
                       {!message.is_own && selectedChat.is_group && (
                         <p className="text-xs font-semibold mb-1 opacity-70">{message.sender_name}</p>
                       )}
-                      <p>{message.text}</p>
+                      
+                      {message.type === 'image' && message.file_url && (
+                        <img src={message.file_url} alt="Изображение" className="rounded-lg max-w-xs mb-2" />
+                      )}
+                      
+                      {message.type === 'file' && message.file_url && (
+                        <a href={message.file_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mb-2 p-2 rounded bg-background/20">
+                          <Icon name="FileText" size={20} />
+                          <span className="text-sm">{message.text}</span>
+                        </a>
+                      )}
+                      
+                      {message.type === 'text' && <p>{message.text}</p>}
+                      
                       <p className="text-xs opacity-70 mt-1">{formatTime(message.time)}</p>
                     </div>
                   </div>
@@ -554,7 +680,17 @@ const Index = () => {
 
             <div className="p-4 border-t border-border">
               <div className="flex gap-2 max-w-3xl mx-auto">
-                <Button variant="ghost" size="icon">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                  className="hidden"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => fileInputRef.current?.click()}
+                >
                   <Icon name="Paperclip" size={20} />
                 </Button>
                 <Input
@@ -564,9 +700,6 @@ const Index = () => {
                   onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
                   className="flex-1"
                 />
-                <Button variant="ghost" size="icon">
-                  <Icon name="Mic" size={20} />
-                </Button>
                 <Button onClick={handleSendMessage} size="icon">
                   <Icon name="Send" size={20} />
                 </Button>

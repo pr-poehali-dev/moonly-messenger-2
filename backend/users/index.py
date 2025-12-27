@@ -80,6 +80,36 @@ def handler(event: dict, context) -> dict:
                     'isBase64Encoded': False
                 }
             
+            elif action == 'friend_requests':
+                cur.execute("""
+                    SELECT fr.id, u.id, u.username, u.nickname, u.avatar_url, fr.created_at, fr.status
+                    FROM friend_requests fr
+                    INNER JOIN users u ON u.id = fr.from_user_id
+                    WHERE fr.to_user_id = %s AND fr.status = 'pending'
+                    ORDER BY fr.created_at DESC
+                """, (user_id,))
+                
+                requests = []
+                for row in cur.fetchall():
+                    requests.append({
+                        'request_id': row[0],
+                        'user_id': row[1],
+                        'username': row[2],
+                        'nickname': row[3],
+                        'avatar_url': row[4],
+                        'created_at': row[5].isoformat()
+                    })
+                
+                cur.close()
+                conn.close()
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                    'body': json.dumps({'requests': requests}),
+                    'isBase64Encoded': False
+                }
+            
             elif action == 'profile':
                 profile_user_id = event.get('queryStringParameters', {}).get('user_id')
                 if profile_user_id:
@@ -216,21 +246,10 @@ def handler(event: dict, context) -> dict:
                 try:
                     cur.execute("""
                         INSERT INTO friend_requests (from_user_id, to_user_id, status)
-                        VALUES (%s, %s, 'accepted')
-                    """, (user_id, to_user_id))
-                    conn.commit()
-                    
-                    cur.execute("""
-                        INSERT INTO chats (is_group, created_by)
-                        VALUES (false, %s)
+                        VALUES (%s, %s, 'pending')
                         RETURNING id
-                    """, (user_id,))
-                    chat_id = cur.fetchone()[0]
-                    
-                    cur.execute("""
-                        INSERT INTO chat_members (chat_id, user_id)
-                        VALUES (%s, %s), (%s, %s)
-                    """, (chat_id, user_id, chat_id, to_user_id))
+                    """, (user_id, to_user_id))
+                    request_id = cur.fetchone()[0]
                     conn.commit()
                     
                     cur.close()
@@ -239,7 +258,7 @@ def handler(event: dict, context) -> dict:
                     return {
                         'statusCode': 200,
                         'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
-                        'body': json.dumps({'success': True, 'chat_id': chat_id}),
+                        'body': json.dumps({'success': True, 'request_id': request_id}),
                         'isBase64Encoded': False
                     }
                 except psycopg2.IntegrityError:
@@ -252,6 +271,88 @@ def handler(event: dict, context) -> dict:
                         'body': json.dumps({'error': 'Запрос уже отправлен'}),
                         'isBase64Encoded': False
                     }
+            
+            elif action == 'accept_friend_request':
+                request_id = body.get('request_id')
+                if not request_id:
+                    return {
+                        'statusCode': 400,
+                        'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                        'body': json.dumps({'error': 'request_id required'}),
+                        'isBase64Encoded': False
+                    }
+                
+                cur.execute("""
+                    SELECT from_user_id FROM friend_requests 
+                    WHERE id = %s AND to_user_id = %s AND status = 'pending'
+                """, (request_id, user_id))
+                
+                request = cur.fetchone()
+                if not request:
+                    cur.close()
+                    conn.close()
+                    return {
+                        'statusCode': 404,
+                        'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                        'body': json.dumps({'error': 'Запрос не найден'}),
+                        'isBase64Encoded': False
+                    }
+                
+                from_user_id = request[0]
+                
+                cur.execute("""
+                    UPDATE friend_requests SET status = 'accepted'
+                    WHERE id = %s
+                """, (request_id,))
+                
+                cur.execute("""
+                    INSERT INTO chats (is_group, created_by)
+                    VALUES (false, %s)
+                    RETURNING id
+                """, (user_id,))
+                chat_id = cur.fetchone()[0]
+                
+                cur.execute("""
+                    INSERT INTO chat_members (chat_id, user_id)
+                    VALUES (%s, %s), (%s, %s)
+                """, (chat_id, user_id, chat_id, from_user_id))
+                
+                conn.commit()
+                cur.close()
+                conn.close()
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                    'body': json.dumps({'success': True, 'chat_id': chat_id}),
+                    'isBase64Encoded': False
+                }
+            
+            elif action == 'reject_friend_request':
+                request_id = body.get('request_id')
+                if not request_id:
+                    return {
+                        'statusCode': 400,
+                        'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                        'body': json.dumps({'error': 'request_id required'}),
+                        'isBase64Encoded': False
+                    }
+                
+                cur.execute("""
+                    UPDATE friend_requests SET status = 'rejected'
+                    WHERE id = %s AND to_user_id = %s AND status = 'pending'
+                """, (request_id, user_id))
+                
+                conn.commit()
+                cur.close()
+                conn.close()
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                    'body': json.dumps({'success': True}),
+                    'isBase64Encoded': False
+                }
         
         return {
             'statusCode': 400,

@@ -80,7 +80,8 @@ def handler(event: dict, context) -> dict:
                                 'unread_count': row[6],
                                 'online': other_user[4],
                                 'status_text': other_user[5],
-                                'status_emoji': other_user[6]
+                                'status_emoji': other_user[6],
+                                'other_user_id': other_user[0]
                             })
                     else:
                         chats.append({
@@ -106,6 +107,8 @@ def handler(event: dict, context) -> dict:
             
             elif action == 'messages':
                 chat_id = event.get('queryStringParameters', {}).get('chat_id')
+                search = event.get('queryStringParameters', {}).get('search', '').strip()
+                
                 if not chat_id:
                     return {
                         'statusCode': 400,
@@ -114,13 +117,23 @@ def handler(event: dict, context) -> dict:
                         'isBase64Encoded': False
                     }
                 
-                cur.execute("""
-                    SELECT m.id, m.message_text, m.message_type, m.file_url, m.created_at, m.sender_id, u.nickname
-                    FROM messages m
-                    INNER JOIN users u ON u.id = m.sender_id
-                    WHERE m.chat_id = %s
-                    ORDER BY m.created_at ASC
-                """, (int(chat_id),))
+                if search:
+                    cur.execute("""
+                        SELECT m.id, m.message_text, m.message_type, m.file_url, m.created_at, m.sender_id, u.nickname
+                        FROM messages m
+                        INNER JOIN users u ON u.id = m.sender_id
+                        WHERE m.chat_id = %s AND m.message_text ILIKE %s
+                        ORDER BY m.created_at DESC
+                        LIMIT 50
+                    """, (int(chat_id), f'%{search}%'))
+                else:
+                    cur.execute("""
+                        SELECT m.id, m.message_text, m.message_type, m.file_url, m.created_at, m.sender_id, u.nickname
+                        FROM messages m
+                        INNER JOIN users u ON u.id = m.sender_id
+                        WHERE m.chat_id = %s
+                        ORDER BY m.created_at ASC
+                    """, (int(chat_id),))
                 
                 messages = []
                 for row in cur.fetchall():
@@ -188,6 +201,35 @@ def handler(event: dict, context) -> dict:
                         'message_id': result[0],
                         'created_at': result[1].isoformat()
                     }),
+                    'isBase64Encoded': False
+                }
+            
+            elif action == 'mute_chat':
+                chat_id = body.get('chat_id')
+                is_muted = body.get('is_muted', True)
+                
+                if not chat_id:
+                    return {
+                        'statusCode': 400,
+                        'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                        'body': json.dumps({'error': 'chat_id required'}),
+                        'isBase64Encoded': False
+                    }
+                
+                cur.execute("""
+                    INSERT INTO chat_settings (chat_id, user_id, is_muted)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (chat_id, user_id) DO UPDATE SET is_muted = EXCLUDED.is_muted
+                """, (chat_id, user_id, is_muted))
+                
+                conn.commit()
+                cur.close()
+                conn.close()
+                
+                return {
+                    'statusCode': 200,
+                    'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                    'body': json.dumps({'success': True}),
                     'isBase64Encoded': False
                 }
             
